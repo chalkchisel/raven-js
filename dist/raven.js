@@ -60,6 +60,7 @@ function Raven() {
         collectWindowErrors: true,
         maxMessageLength: 100
     };
+    this._ignoreOnError = 0;
     this._isRavenInstalled = false;
     // capture references to window.console *and* all its methods first
     // before the console plugin has a chance to monkey patch
@@ -83,6 +84,8 @@ Raven.prototype = {
     VERSION: '<%= pkg.version %>',
 
     debug: true,
+
+    TraceKit: TraceKit, // alias to TraceKit
 
     /*
      * Configure Raven with a DSN and extra options
@@ -135,7 +138,7 @@ Raven.prototype = {
                       (uri.port ? ':' + uri.port : '') +
                       '/' + path + 'api/' + this._globalProject + '/store/';
 
-        if (uri.protocol && uri.host !== 'app.getsentry.com') {
+        if (uri.protocol) {
             this._globalServer = uri.protocol + ':' + this._globalServer;
         }
 
@@ -166,8 +169,11 @@ Raven.prototype = {
         if (this.isSetup() && !this._isRavenInstalled) {
             TraceKit.report.subscribe(function () {
                 // maintain 'self'
-                self._handleStackInfo.apply(self, arguments);
+                if (!self._ignoreOnError) {
+                    self._handleStackInfo.apply(self, arguments);
+                }
             });
+            this._wrapBuiltIns();
 
             // Install all of the plugins
             this._drainPlugins();
@@ -229,6 +235,11 @@ Raven.prototype = {
             return func;
         }
 
+        // If this has already been wrapped in the past, return that
+        if (func.__wrapper__){
+            return func.__wrapper__;
+        }
+
         function wrapped() {
             var args = [], i = arguments.length,
                 deep = !options || options && options.deep !== false;
@@ -241,6 +252,7 @@ Raven.prototype = {
                 /*jshint -W040*/
                 return func.apply(this, args);
             } catch(e) {
+                self._ignoreNextOnError();
                 self.captureException(e, options);
                 throw e;
             }
@@ -252,6 +264,8 @@ Raven.prototype = {
                 wrapped[property] = func[property];
             }
         }
+        func.__wrapper__ = wrapped;
+
         wrapped.prototype = func.prototype;
 
         // Signal that this function has been wrapped already
@@ -497,6 +511,14 @@ Raven.prototype = {
     },
 
     /**** Private functions ****/
+    _ignoreNextOnError: function () {
+        this._ignoreOnError += 1;
+        setTimeout(function () {
+            // onerror should trigger before setTimeout
+            this._ignoreOnError -= 1;
+        });
+    },
+
     _triggerEvent: function(eventType, options) {
         // NOTE: `event` is a native browser thing, so let's avoid conflicting wiht it
         var evt, key;
@@ -535,6 +557,70 @@ Raven.prototype = {
     /**
      * Install any queued plugins
      */
+    _wrapBuiltIns: function() {
+        var self = this;
+
+        function fill(obj, name, replacement) {
+            var orig = obj[name];
+            obj[name] = replacement(orig);
+        }
+
+        function wrapTimeFn(orig) {
+            return function (fn, t) { // preserve arity
+                // Make a copy of the arguments
+                var args = [].slice.call(arguments);
+                var originalCallback = args[0];
+                if (typeof (originalCallback) === 'function') {
+                    args[0] = self.wrap(originalCallback);
+                }
+
+                // IE < 9 doesn't support .call/.apply on setInterval/setTimeout, but it
+                // also supports only two arguments and doesn't care what this is, so we
+                // can just call the original function directly.
+                if (orig.apply) {
+                    return orig.apply(this, args);
+                } else {
+                    return orig(args[0], args[1]);
+                }
+            };
+        }
+
+        fill(window, 'setTimeout', wrapTimeFn);
+        fill(window, 'setInterval', wrapTimeFn);
+        if (window.requestAnimationFrame) {
+            fill(window, 'requestAnimationFrame', function (orig) {
+                return function (cb) {
+                    orig(self.wrap(cb));
+                };
+            });
+        }
+
+        // event targets borrowed from bugsnag-js:
+        // https://github.com/bugsnag/bugsnag-js/blob/master/src/bugsnag.js#L666
+        'EventTarget Window Node ApplicationCache AudioTrackList ChannelMergerNode CryptoOperation EventSource FileReader HTMLUnknownElement IDBDatabase IDBRequest IDBTransaction KeyOperation MediaController MessagePort ModalWindow Notification SVGElementInstance Screen TextTrack TextTrackCue TextTrackList WebSocket WebSocketWorker Worker XMLHttpRequest XMLHttpRequestEventTarget XMLHttpRequestUpload'.replace(/\w+/g, function (global) {
+            var proto = window[global] && window[global].prototype;
+            if (proto && proto.hasOwnProperty && proto.hasOwnProperty('addEventListener')) {
+                fill(proto, 'addEventListener', function(orig) {
+                    return function (evt, fn, capture, secure) { // preserve arity
+                        try {
+                            if (fn && fn.handleEvent) {
+                                fn.handleEvent = self.wrap(fn.handleEvent);
+                            }
+                        } catch (err) {} // can sometimes get 'Permission denied to access property "handle Event'
+                        return orig.call(this, evt, self.wrap(fn), capture, secure);
+                    };
+                });
+                fill(proto, 'removeEventListener', function (orig) {
+                    return function (evt, fn, capture, secure) {
+                        fn = fn && (fn.__wrapper__ ? fn.__wrapper__ : fn);
+                        return orig.call(this, evt, fn, capture, secure);
+                    };
+                });
+            }
+        });
+
+    },
+
     _drainPlugins: function() {
         var self = this;
 
@@ -689,21 +775,21 @@ Raven.prototype = {
         if (!!this._globalOptions.ignoreUrls.test && this._globalOptions.ignoreUrls.test(fileurl)) return;
         if (!!this._globalOptions.whitelistUrls.test && !this._globalOptions.whitelistUrls.test(fileurl)) return;
 
+        var data = objectMerge({
+            // sentry.interfaces.Exception
+            exception: {
+                values: [{
+                    type: type,
+                    value: message,
+                    stacktrace: stacktrace
+                }]
+            },
+            culprit: fileurl,
+            message: fullMessage
+        }, options);
+
         // Fire away!
-        this._send(
-            objectMerge({
-                // sentry.interfaces.Exception
-                exception: {
-                    values: [{
-                        type: type,
-                        value: message,
-                        stacktrace: stacktrace
-                    }]
-                },
-                culprit: fileurl,
-                message: fullMessage
-            }, options)
-        );
+        this._send(data);
     },
 
     _trimPacket: function(data) {
@@ -849,6 +935,7 @@ Raven.prototype = {
     _makeXhrRequest: function(opts) {
         var request;
 
+        var url = opts.url;
         function handler() {
             if (request.status === 200) {
                 if (opts.onSuccess) {
@@ -869,13 +956,17 @@ Raven.prototype = {
             };
         } else {
             request = new XDomainRequest();
+            // xdomainrequest cannot go http -> https (or vice versa),
+            // so always use protocol relative
+            url = url.replace(/^https?:/, '');
+
             // onreadystatechange not supported by XDomainRequest
             request.onload = handler;
         }
 
         // NOTE: auth is intentionally sent as part of query string (NOT as custom
         //       HTTP header) so as to avoid preflight CORS requests
-        request.open('POST', opts.url + '?' + urlencode(opts.auth));
+        request.open('POST', url + '?' + urlencode(opts.auth));
         request.send(JSON.stringify(opts.data));
     },
 
