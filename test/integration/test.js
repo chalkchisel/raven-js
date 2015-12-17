@@ -9,7 +9,7 @@ function iframeExecute(iframe, done, execute, assertCallback) {
         }
     }
     // use setTimeout so stack trace doesn't go all the way back to mocha test runner
-    iframe.contentWindow.eval('setTimeout(' + execute.toString() + ');');
+    iframe.contentWindow.eval('origSetTimeout(' + execute.toString() + ');');
 }
 
 function createIframe(done) {
@@ -24,52 +24,9 @@ function createIframe(done) {
 }
 
 describe('integration', function () {
-    var timeoutStackDepth = 0;
-    var eventHandlerStackDepth = 0;
-
-    before(function (done) {
-        // Before running any tests, throw/catch a known error
-        // inside setTimeout to get a baseline expected stack
-        // depth for future errors (this is different in every
-        // browser).
-        var iframe = createIframe(function () {
-            iframe.contentWindow.setTimeout(function () {
-                try {
-                    iframe.contentWindow.foo();
-                } catch (e) {
-                    var trace = Raven.TraceKit.computeStackTrace(e);
-                    timeoutStackDepth = trace.stack.length;
-                }
-
-                var doc = iframe.contentWindow.document;
-                var div = doc.createElement('div');
-                doc.body.appendChild(div);
-                div.addEventListener('click', function () {
-                    try {
-                        foo();
-                    } catch (e) {
-                        var trace = Raven.TraceKit.computeStackTrace(e);
-                        eventHandlerStackDepth = trace.stack.length;
-                    }
-                }, false);
-
-                var evt;
-                if (doc.createEvent) {
-                    evt = doc.createEvent('MouseEvents');
-                    evt.initEvent('click', true, false);
-                    div.dispatchEvent(evt);
-                } else if(doc.createEventObject) {
-                    div.fireEvent('onclick');
-                }
-
-                document.body.removeChild(iframe);
-                done();
-            });
-        });
-    });
 
     beforeEach(function (done) {
-        var iframe = this.iframe = createIframe(done);
+        this.iframe = createIframe(done);
     });
 
     afterEach(function () {
@@ -136,7 +93,7 @@ describe('integration', function () {
                 },
                 function () {
                     var ravenData = iframe.contentWindow.ravenData;
-                    assert.equal(ravenData.exception.values[0].stacktrace.frames.length, eventHandlerStackDepth + 2);
+                    assert.isAbove(ravenData.exception.values[0].stacktrace.frames.length, 2);
                 }
             );
         });
@@ -182,7 +139,7 @@ describe('integration', function () {
                 },
                 function () {
                     var ravenData = iframe.contentWindow.ravenData;
-                    assert.equal(ravenData.exception.values[0].stacktrace.frames.length, timeoutStackDepth);
+                    assert.isAbove(ravenData.exception.values[0].stacktrace.frames.length, 2);
                 }
             );
         });
@@ -200,7 +157,7 @@ describe('integration', function () {
                 },
                 function () {
                     var ravenData = iframe.contentWindow.ravenData;
-                    assert.equal(ravenData.exception.values[0].stacktrace.frames.length, timeoutStackDepth);
+                    assert.isAbove(ravenData.exception.values[0].stacktrace.frames.length, 2);
                 }
             );
         });
@@ -219,8 +176,30 @@ describe('integration', function () {
                 },
                 function () {
                     var ravenData = iframe.contentWindow.ravenData;
-                    assert.equal(ravenData.exception.values[0].stacktrace.frames.length, timeoutStackDepth);
+                    assert.isAbove(ravenData.exception.values[0].stacktrace.frames.length, 2);
                 }
+            );
+        });
+
+        it('should capture exceptions from XMLHttpRequest event handlers (e.g. onreadystatechange)', function (done) {
+            var iframe = this.iframe;
+
+            iframeExecute(iframe, done,
+              function () {
+                  setTimeout(done);
+                  var xhr = new XMLHttpRequest();
+                  xhr.onreadystatechange = function () {
+                      foo();
+                  }
+                  xhr.open('GET', 'example.json');
+                  xhr.send();
+              },
+              function () {
+                  var ravenData = iframe.contentWindow.ravenData;
+                  console.log(ravenData);
+                  // # of frames alter significantly between chrome/firefox & safari
+                  assert.isAbove(ravenData.exception.values[0].stacktrace.frames.length, 2);
+              }
             );
         });
     });
