@@ -289,3 +289,14 @@ deduplicate by taking into account the URL:
 .. sentry:edition:: hosted, on-premise
 
     For more information, see :ref:`custom-grouping`.
+
+Preventing Abuse
+----------------
+
+By default, the Sentry server accepts errors from any host. To prevent abuse,
+it is recommended to whitelist known hosts where your JavaScript code is operating.
+
+This can be found under the **Project Settings** page in Sentry. You'll need
+to add each domain that you plan to report from into the **Allowed Domains**
+box. Alternatively if you're not worried about CORS security, you can simply
+enter ``*`` to whitelist all domains.
