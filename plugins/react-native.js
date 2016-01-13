@@ -9,7 +9,7 @@
  */
 'use strict';
 
-var DEVICE_PATH_RE = /^\/var\/mobile\/Containers\/Bundle\/Application\/[^\/]+\/[^\.]+\.app/;
+var DEVICE_PATH_RE = /^(.*)Containers\/Bundle\/Application\/[^\/]+\/[^\.]+\.app/;
 function normalizeUrl(url) {
     return url
         .replace(/^file\:\/\//, '')
